@@ -475,3 +475,202 @@ ComPtr<IDXGISwapChain4> CreateSwapChain(HWND hWnd,ComPtr<ID3D12CommandQueue> com
 
 	return dxgiSwapChain4;
 }
+
+//Kreiranje descript heap-a, odnosno array resource view-a
+//Resource view moze biti:
+//Render target view, Shader resource view, unorderd access view, constant buffer view
+ComPtr<ID3D12DescriptorHeap> CreateDescriptorHeap(ComPtr<ID3D12Device2> device, D3D12_DESCRIPTOR_HEAP_TYPE type, uint32_t numDescriptors)
+{
+	ComPtr<ID3D12DescriptorHeap> descriptorHeap;
+	//D3D12_DESCRIPTOR_HEAP_DESC args:
+	/*
+	* D3D12_DESCRIPTOR_HEAP_TYPE  Type;
+				//Tip moze biti:
+				//D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV descriptor heap za kombinaciju constant buffer, shader resource i unordered acces view-a
+				//D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER descriptor heap za sampler?
+				//D3D12_DESCRIPTOR_HEAP_TYPE_RTV descriptor heap  za render target view
+				//D3D12_DESCRIPTOR_HEAP_TYPE_DSV descriptor heap za depth stencil view
+	* UINT                        NumDescriptors;
+				//broj descriptora na heap-u
+	* D3D12_DESCRIPTOR_HEAP_FLAGS Flags;
+	* UINT                        NodeMask;
+				//kombinacija D3D12_DESCRIPTOR_HEAP_FLAGS
+	*/
+	D3D12_DESCRIPTOR_HEAP_DESC desc = {};
+	desc.NumDescriptors = numDescriptors;
+	desc.Type = type;
+
+	ThrowIfFailed(device->CreateDescriptorHeap(&desc, IID_PPV_ARGS(&descriptorHeap)));
+
+	return descriptorHeap;
+}
+
+//Render target view
+//Opisuje resurs koji se moze attach-ati na slot u unutar merger stage-a, render target view
+//opisuje resurs koji prima funal color izracunatu od pixel shader stage-a
+void UpdateRenderTargetViews(ComPtr<ID3D12Device2> device,ComPtr<IDXGISwapChain4> swapChain, ComPtr<ID3D12DescriptorHeap> descriptorHeap)
+{
+	//velicina descriptora je vendor specific, stoga ovdje dohvacamo tu vrijednost
+	auto rtvDescriptorSize = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
+
+	CD3DX12_CPU_DESCRIPTOR_HANDLE rtvHandle(descriptorHeap->GetCPUDescriptorHandleForHeapStart());
+
+	for (int i = 0; i < g_NumFrames; ++i)
+	{
+		ComPtr<ID3D12Resource> backBuffer;
+		//Dohvacam svaki back buffer u swap chain-u
+		ThrowIfFailed(swapChain->GetBuffer(i, IID_PPV_ARGS(&backBuffer)));
+		//Kreiranje render target view-a
+		device->CreateRenderTargetView(backBuffer.Get(), nullptr, rtvHandle);
+
+		g_BackBuffers[i] = backBuffer;
+		//Pomakni pointer za velicinu deskriptora
+		rtvHandle.Offset(rtvDescriptorSize);
+	}
+}
+
+//Command allocator
+ComPtr<ID3D12CommandAllocator> CreateCommandAllocator(ComPtr<ID3D12Device2> device,D3D12_COMMAND_LIST_TYPE type)
+{
+	ComPtr<ID3D12CommandAllocator> commandAllocator;
+	//D3D12_COMMAND_LIST_TYPE ima ove tipove:
+	//D3D12_COMMAND_LIST_TYPE_DIRECT -command buffer GPU can execute, direct buffer ne nasljeduje GPU state?
+	//D3D12_COMMAND_LIST_TYPE_BUNDLE - command buffer koji nasljeduje GPU state
+	//D3D12_COMMAND_LIST_TYPE_COMPUTE - command buffer za computing
+	//D3D12_COMMAND_LIST_TYPE_COPY -command buffer za kopiranje
+
+	ThrowIfFailed(device->CreateCommandAllocator(type, IID_PPV_ARGS(&commandAllocator)));
+
+	return commandAllocator;
+}
+
+//Command list
+//sadrzi napredpe koje ce biti pokrenute na GPU-u
+ComPtr<ID3D12GraphicsCommandList> CreateCommandList(ComPtr<ID3D12Device2> device, ComPtr<ID3D12CommandAllocator> commandAllocator, D3D12_COMMAND_LIST_TYPE type)
+{
+	ComPtr<ID3D12GraphicsCommandList> commandList;
+	//CreateCommandList args
+	/*
+	* [in]           UINT                    nodeMask,
+				//Gpu node-ovi
+	* [in]           D3D12_COMMAND_LIST_TYPE type,
+				//type objasenjen gore
+	* [in]           ID3D12CommandAllocator  *pCommandAllocator,
+				//pointer na alokator, alokator  stvara command list?
+	* [in, optional] ID3D12PipelineState     *pInitialState
+	* REFIID         riid,
+	*[out]           void                    **ppCommandList
+	*/
+	ThrowIfFailed(device->CreateCommandList(0, type, commandAllocator.Get(), nullptr, IID_PPV_ARGS(&commandList)));
+
+	ThrowIfFailed(commandList->Close());
+
+	return commandList;
+}
+
+///GPU sinkronizacija
+ComPtr<ID3D12Fence> CreateFence(ComPtr<ID3D12Device2> device)
+{
+	ComPtr<ID3D12Fence> fence;
+
+	ThrowIfFailed(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence)));
+
+	return fence;
+}
+//OS event handle, govori CPU thread-u da ceka
+HANDLE CreateEventHandle()
+{
+	HANDLE fenceEvent;
+
+	fenceEvent = ::CreateEvent(NULL, FALSE, FALSE, NULL);
+	assert(fenceEvent && "Failed to create fence event.");
+
+	return fenceEvent;
+}
+//Signal the fence
+uint64_t Signal(ComPtr<ID3D12CommandQueue> commandQueue, ComPtr<ID3D12Fence> fence, uint64_t& fenceValue)
+{
+	uint64_t fenceValueForSignal = ++fenceValue;
+	//setira fence na vrijednost
+	ThrowIfFailed(commandQueue->Signal(fence.Get(), fenceValueForSignal));
+
+	return fenceValueForSignal;
+}
+//cekaj na fence value
+void WaitForFenceValue(ComPtr<ID3D12Fence> fence, uint64_t fenceValue, HANDLE fenceEvent,std::chrono::milliseconds duration = std::chrono::milliseconds::max())
+{
+	if (fence->GetCompletedValue() < fenceValue)
+	{
+		ThrowIfFailed(fence->SetEventOnCompletion(fenceValue, fenceEvent));
+		::WaitForSingleObject(fenceEvent, static_cast<DWORD>(duration.count()));
+	}
+}
+//flush the GPU, osiguraj da sve napredbe pokrenute na GPU-u su zavrsilie
+void Flush(ComPtr<ID3D12CommandQueue> commandQueue, ComPtr<ID3D12Fence> fence,uint64_t& fenceValue, HANDLE fenceEvent)
+{
+	uint64_t fenceValueForSignal = Signal(commandQueue, fence, fenceValue);
+	WaitForFenceValue(fence, fenceValueForSignal, fenceEvent);
+}
+
+void Update()
+{
+	static uint64_t frameCounter = 0;
+	static double elapsedSeconds = 0.0;
+	static std::chrono::high_resolution_clock clock;
+	static auto t0 = clock.now();
+
+	frameCounter++;
+	auto t1 = clock.now();
+	auto deltaTime = t1 - t0;
+	t0 = t1;
+	elapsedSeconds += deltaTime.count() * 1e-9;
+	if (elapsedSeconds > 1.0)
+	{
+		char buffer[500];
+		auto fps = frameCounter / elapsedSeconds;
+		sprintf_s(buffer, 500, "FPS: %f\n", fps);
+		OutputDebugString(buffer);
+
+		frameCounter = 0;
+		elapsedSeconds = 0.0;
+	}
+}
+//Render funkcija, sastoji se od dva dijela, ocisti back buffer->presentaj rendered frame
+void Render()
+{
+	auto commandAllocator = g_CommandAllocators[g_CurrentBackBufferIndex];
+	auto backBuffer = g_BackBuffers[g_CurrentBackBufferIndex];
+
+	commandAllocator->Reset();
+	g_CommandList->Reset(commandAllocator.Get(), nullptr);
+	// Clear the render target.
+	{
+		//prebaci sve subresurse na isti state
+		CD3DX12_RESOURCE_BARRIER barrier = CD3DX12_RESOURCE_BARRIER::Transition(backBuffer.Get(),D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_RENDER_TARGET);
+
+		g_CommandList->ResourceBarrier(1, &barrier);
+
+		FLOAT clearColor[] = { 0.4f, 0.6f, 0.9f, 1.0f };
+		CD3DX12_CPU_DESCRIPTOR_HANDLE rtv(g_RTVDescriptorHeap->GetCPUDescriptorHandleForHeapStart(),g_CurrentBackBufferIndex, g_RTVDescriptorSize);
+		//Ocisti RTV
+		g_CommandList->ClearRenderTargetView(rtv, clearColor, 0, nullptr);
+	}
+	// Present
+	{
+		CD3DX12_RESOURCE_BARRIER barrier = CD3DX12_RESOURCE_BARRIER::Transition(backBuffer.Get(),D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PRESENT);
+		g_CommandList->ResourceBarrier(1, &barrier);
+		ThrowIfFailed(g_CommandList->Close());
+
+		ID3D12CommandList* const commandLists[] = {g_CommandList.Get()};
+		//Pokreni naredbe iz command listi
+		g_CommandQueue->ExecuteCommandLists(_countof(commandLists), commandLists);
+
+		UINT syncInterval = g_VSync ? 1 : 0;
+		UINT presentFlags = g_TearingSupported && !g_VSync ? DXGI_PRESENT_ALLOW_TEARING : 0;
+		ThrowIfFailed(g_SwapChain->Present(syncInterval, presentFlags));
+		g_FrameFenceValues[g_CurrentBackBufferIndex] = Signal(g_CommandQueue, g_Fence, g_FenceValue);
+		g_CurrentBackBufferIndex = g_SwapChain->GetCurrentBackBufferIndex();
+		WaitForFenceValue(g_Fence, g_FrameFenceValues[g_CurrentBackBufferIndex], g_FenceEvent);
+	}
+}
+
