@@ -36,6 +36,7 @@ using namespace Microsoft::WRL;
 //Ekstenzija za D3D12 library, nije unutar VS-a, mora se skinuti na https://github.com/Microsoft/DirectX-Graphics-Samples/tree/master/Libraries/D3DX12
 #include "Library/D3DX12/d3dx12.h"
 
+
 //Headeri iz Standard Template Library-a
 //math funkcije eg. std::min, std::max
 #include <algorithm>
