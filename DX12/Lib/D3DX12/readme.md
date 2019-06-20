@@ -1,3 +1,5 @@
+**Note:** *This library has been copied from https://github.com/microsoft/DirectX-Graphics-Samples on 06.20.2019, I had problems implementing submodules so I had to take it from Microsoft repository. I would love if somebody would show me how to link files from other repositories to mine, so feel free to contact me!*
+
 # The D3D12 Helper Library
 
 This library provides helper functions and structs to make certain common operations less verbose in your code.
